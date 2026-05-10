@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ResumeUploadPayload",
+  "type": "object",
+  "required": ["user_id", "file_name", "raw_text", "uploaded_at"],
+  "properties": {
+    "user_id": { "type": "string", "minLength": 3 },
+    "file_name": { "type": "string" },
+    "raw_text": { "type": "string", "minLength": 1 },
+    "uploaded_at": { "type": "string", "format": "date-time" }
+  }
+}

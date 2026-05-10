@@ -1,0 +1,18 @@
+version: 1
+entity: silver.resume_skills
+rules:
+  - name: user_id_not_null
+    type: not_null
+    column: user_id
+  - name: normalized_skill_not_null
+    type: not_null
+    column: normalized_skill
+  - name: confidence_range
+    type: between
+    column: confidence
+    min: 0.0
+    max: 1.0
+  - name: duplicate_threshold
+    type: duplicate_ratio
+    columns: [user_id, normalized_skill]
+    max_ratio: 0.02

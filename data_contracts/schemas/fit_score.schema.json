@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FitScoreResponse",
+  "type": "object",
+  "required": ["role", "score", "top_matched_skills", "missing_critical_skills"],
+  "properties": {
+    "role": { "type": "string" },
+    "score": { "type": "integer", "minimum": 0, "maximum": 100 },
+    "top_matched_skills": { "type": "array", "items": { "type": "string" } },
+    "missing_critical_skills": { "type": "array", "items": { "type": "string" } }
+  }
+}
