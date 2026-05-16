@@ -1,5 +1,5 @@
 version: 1
-entity: silver.resume_skills
+entity: career_copilot_dev.main.silver_resume_skills
 rules:
   - name: user_id_not_null
     type: not_null

@@ -8,24 +8,21 @@
     {
       "task_key": "ingest_resume",
       "notebook_task": {
-        "notebook_path": "/Repos/career-copilot/databricks/notebooks/01_ingest_resume",
-        "base_parameters": {
-          "input_path": "dbfs:/tmp/career_copilot/resume_payloads"
-        }
+        "notebook_path": "/Repos/career-copilot-databricks/databricks/notebooks/main/01_ingest_resume"
       }
     },
     {
       "task_key": "build_silver_skills",
       "depends_on": [{ "task_key": "ingest_resume" }],
       "notebook_task": {
-        "notebook_path": "/Repos/career-copilot/databricks/notebooks/02_build_silver_skills"
+        "notebook_path": "/Repos/career-copilot-databricks/databricks/notebooks/main/02_build_silver_skills"
       }
     },
     {
       "task_key": "build_gold_features",
       "depends_on": [{ "task_key": "build_silver_skills" }],
       "notebook_task": {
-        "notebook_path": "/Repos/career-copilot/databricks/notebooks/03_build_gold_features"
+        "notebook_path": "/Repos/career-copilot-databricks/databricks/notebooks/main/03_build_gold_features"
       }
     }
   ]

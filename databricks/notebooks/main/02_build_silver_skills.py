@@ -1,23 +1,38 @@
 # Databricks notebook source
-# DBTITLE 1,Silver Layer - Text & Skill Extraction
-# Purpose: Extract text from resume files and identify skills
-# Step 1: Read PDF/DOCX files and extract raw text
-# Step 2: Parse skills from extracted text
+# DBTITLE 1,Silver Layer - Orchestration Notebook
+# Purpose: Extract text and run standardized Silver cleanup/extraction pipeline
 
 from pyspark.sql import functions as F
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, TimestampType
-
-print("🚀 Starting Silver layer processing...")
-print("📋 Step 1: Text Extraction")
-print("📋 Step 2: Skill Extraction")
 
 # COMMAND ----------
 
-# DBTITLE 1,Create Silver Text Table
-# Create table to store extracted resume text
+# MAGIC %run ../helpers/silver_helper
 
-spark.sql("""
-CREATE TABLE IF NOT EXISTS career_copilot_dev.main.silver_resume_text (
+# COMMAND ----------
+
+print("Starting Silver layer processing...")
+
+# Namespace and path configuration
+CATALOG = "career_copilot_dev"
+SCHEMA = "main"
+VOLUME_BASE_PATH = "/Volumes/career_copilot_dev/common/filestore-common/ResumeData"
+BRONZE_RAW_RESUMES = f"{CATALOG}.{SCHEMA}.bronze_raw_resumes"
+SILVER_RESUME_TEXT = f"{CATALOG}.{SCHEMA}.silver_resume_text"
+SILVER_RESUME_SKILLS = f"{CATALOG}.{SCHEMA}.silver_resume_skills"
+SILVER_RESUME_TEXT_CLEAN = f"{CATALOG}.{SCHEMA}.silver_resume_text_clean"
+SILVER_RESUME_SECTIONS = f"{CATALOG}.{SCHEMA}.silver_resume_sections"
+SILVER_RESUME_ENTITIES = f"{CATALOG}.{SCHEMA}.silver_resume_entities"
+SILVER_SKILL_EVIDENCE = f"{CATALOG}.{SCHEMA}.silver_resume_skill_evidence"
+SILVER_EXPERIENCE_FEATURES = f"{CATALOG}.{SCHEMA}.silver_resume_experience_features"
+SILVER_RESUME_QUALITY = f"{CATALOG}.{SCHEMA}.silver_resume_quality"
+SILVER_PII_REDACTED_TEXT = f"{CATALOG}.{SCHEMA}.silver_pii_redacted_text"
+SILVER_QUARANTINE = f"{CATALOG}.{SCHEMA}.silver_quarantine_resume_records"
+
+# COMMAND ----------
+
+# DBTITLE 1,Ensure Core Silver Tables Exist
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {SILVER_RESUME_TEXT} (
   file_id STRING NOT NULL,
   user_id STRING NOT NULL,
   raw_text STRING,
@@ -25,47 +40,50 @@ CREATE TABLE IF NOT EXISTS career_copilot_dev.main.silver_resume_text (
   extraction_method STRING,
   extraction_status STRING,
   error_message STRING,
-  extracted_at TIMESTAMP,
-  CONSTRAINT silver_resume_text_pk PRIMARY KEY (file_id)
+  extracted_at TIMESTAMP
 ) USING DELTA
 """)
 
-print("✅ Silver text table created/verified")
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {SILVER_RESUME_SKILLS} (
+  file_id STRING,
+  user_id STRING NOT NULL,
+  normalized_skill STRING NOT NULL,
+  confidence DOUBLE,
+  processed_at TIMESTAMP
+) USING DELTA
+""")
+
+print("Verified core Silver tables")
 
 # COMMAND ----------
 
 # DBTITLE 1,Install Text Extraction Libraries
-# Install libraries for reading PDF and DOCX files
 %pip install PyPDF2 python-docx --quiet
 
 # COMMAND ----------
 
-# DBTITLE 1,Extract Text from Resume Files
-# Extract text from PDF/DOCX/TXT files in Volumes
+# DBTITLE 1,Extract Raw Text From Pending Bronze Files
 import PyPDF2
 import docx
 import io
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType
 
-print("\n📝 Extracting text from resume files...")
+bronze_df = spark.table(BRONZE_RAW_RESUMES).filter(F.col("processing_status") == "pending")
+pending_count = bronze_df.count()
 
-# Read pending files from bronze
-bronze_df = spark.table("career_copilot_dev.main.bronze_raw_resumes").filter(F.col("processing_status") == "pending")
-
-if bronze_df.count() == 0:
-    print("ℹ️ No pending files to process")
+if pending_count == 0:
+    print("No pending files to process")
 else:
-    print(f"📄 Processing {bronze_df.count()} files...")
-    
-    # Read files as binary RECURSIVELY to include subdirectories
+    print(f"Processing {pending_count} files...")
+
     binary_df = (
         spark.read
         .format("binaryFile")
-        .option("recursiveFileLookup", "true")  # KEY: Read subdirectories!
-        .load("/Volumes/career_copilot_dev/common/filestore-common/ResumeData")
+        .option("recursiveFileLookup", "true")
+        .load(VOLUME_BASE_PATH)
     )
-    
-    # Join with bronze metadata
+
     files_to_process = bronze_df.join(
         binary_df,
         bronze_df.file_path == binary_df.path,
@@ -76,10 +94,10 @@ else:
         bronze_df.file_type,
         binary_df.content.alias("file_content")
     )
-    
-    print(f"✅ Found {files_to_process.count()} matching file(s) to process")
-    
-    # Define schema for results DataFrame
+
+    matched_count = files_to_process.count()
+    print(f"Found {matched_count} matching file(s) to process")
+
     results_schema = StructType([
         StructField("file_id", StringType(), False),
         StructField("user_id", StringType(), False),
@@ -89,15 +107,13 @@ else:
         StructField("extraction_status", StringType(), True),
         StructField("error_message", StringType(), True)
     ])
-    
-    # Process files locally (collect to driver for text extraction)
+
     results = []
     for row in files_to_process.collect():
         try:
             file_bytes = bytes(row.file_content)
-            
+
             if row.file_type == "pdf":
-                # Extract text from PDF
                 pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
                 text = ""
                 for page in pdf_reader.pages:
@@ -105,26 +121,23 @@ else:
                 text = text.strip()
                 status = "success"
                 error = None
-                
+
             elif row.file_type == "docx":
-                # Extract text from DOCX
                 doc = docx.Document(io.BytesIO(file_bytes))
-                text = "\n".join([para.text for para in doc.paragraphs])
-                text = text.strip()
+                text = "\n".join([para.text for para in doc.paragraphs]).strip()
                 status = "success"
                 error = None
-                
+
             elif row.file_type == "txt":
-                # Plain text file
-                text = file_bytes.decode('utf-8', errors='ignore').strip()
+                text = file_bytes.decode("utf-8", errors="ignore").strip()
                 status = "success"
                 error = None
-                
+
             else:
                 text = ""
                 status = "failed"
                 error = f"Unsupported file type: {row.file_type}"
-            
+
             results.append((
                 row.file_id,
                 row.user_id,
@@ -134,7 +147,7 @@ else:
                 status,
                 error
             ))
-            
+
         except Exception as e:
             results.append((
                 row.file_id,
@@ -145,102 +158,91 @@ else:
                 "failed",
                 str(e)
             ))
-    
+
     if results:
-        # Create DataFrame with explicit schema
         extracted_df = spark.createDataFrame(results, schema=results_schema).withColumn("extracted_at", F.current_timestamp())
-        
-        # Show sample
-        print("\n📝 Sample extracted text:")
-        display(extracted_df.select(
-            "user_id", 
-            "text_length", 
-            "extraction_status",
-            F.substring(F.col("raw_text"), 1, 200).alias("text_preview")
-        ))
-        
-        # Save to silver text table
-        extracted_df.write.format("delta").mode("append").saveAsTable("career_copilot_dev.main.silver_resume_text")
-        
-        # Update bronze status
+        extracted_df.write.format("delta").mode("append").saveAsTable(SILVER_RESUME_TEXT)
+
         for row in extracted_df.collect():
+            next_status = "completed" if row.extraction_status == "success" else "failed"
+            safe_err = (row.error_message or "").replace("'", "''")
             spark.sql(f"""
-                UPDATE career_copilot_dev.main.bronze_raw_resumes
-                SET processing_status = 'completed', last_updated = CURRENT_TIMESTAMP()
+                UPDATE {BRONZE_RAW_RESUMES}
+                SET processing_status = '{next_status}',
+                    last_updated = CURRENT_TIMESTAMP(),
+                    error_message = '{safe_err}'
                 WHERE file_id = '{row.file_id}'
             """)
-        
-        print(f"\n✅ Extracted text from {len(results)} file(s)")
+
+        print(f"Extracted text from {len(results)} file(s)")
 
 # COMMAND ----------
 
-# DBTITLE 1,Create Silver Skills Table
-# Create table to store extracted skills
+# DBTITLE 1,Run Helper-Based Silver Transformations
+success_df = spark.table(SILVER_RESUME_TEXT).filter(F.col("extraction_status") == "success")
+success_count = success_df.count()
 
-spark.sql("""
-CREATE TABLE IF NOT EXISTS career_copilot_dev.main.silver_resume_skills (
-  user_id STRING NOT NULL,
-  normalized_skill STRING NOT NULL,
-  confidence DOUBLE,
-  processed_at TIMESTAMP,
-  CONSTRAINT silver_resume_skills_pk PRIMARY KEY (user_id, normalized_skill)
-) USING DELTA
-""")
-
-print("✅ Silver skills table created/verified")
-
-# COMMAND ----------
-
-# DBTITLE 1,Extract Skills from Resume Text
-# Extract and normalize skills from resume text
-
-print("\n🎯 Extracting skills from resume text...")
-
-# Extended skill regex with common technical skills
-SKILL_REGEX = "(python|sql|excel|statistics|pandas|numpy|power bi|tableau|machine learning|data structures|algorithms|api design|product sense|a/b testing|spark|pyspark|scala|java|javascript|react|nodejs|aws|azure|gcp|docker|kubernetes|git|jenkins|ci/cd|rest api|graphql|mongodb|postgresql|mysql|redis|kafka|airflow|dbt|looker|metabase|r programming|scikit-learn|tensorflow|pytorch|nlp|deep learning|computer vision|data engineering|etl|data warehousing|snowflake|redshift|bigquery|hadoop|hive|presto|linux|bash|shell scripting|agile|scrum|jira|confluence)"
-
-# Read successfully extracted text
-text_df = spark.table("career_copilot_dev.main.silver_resume_text").filter(F.col("extraction_status") == "success")
-
-if text_df.count() == 0:
-    print("⚠️ No successfully extracted text to process")
+if success_count == 0:
+    print("No successful text records to transform")
 else:
-    print(f"📝 Processing {text_df.count()} resume(s)...")
-    
-    # Extract skills using regex matching
-    skills_df = (
-        text_df
-        .select("user_id", "raw_text")
-        # Split text into words and convert to lowercase
-        .withColumn("skill_raw", F.explode(F.split(F.lower(F.col("raw_text")), "[^a-z0-9/+ ]+")))
-        .withColumn("skill_raw", F.trim(F.col("skill_raw")))
-        # Filter to only known skills
-        .filter(F.col("skill_raw").rlike(SKILL_REGEX))
-        # Normalize skill names (replace spaces with underscores)
-        .withColumn("normalized_skill", F.regexp_replace(F.col("skill_raw"), " ", "_"))
-        .select("user_id", "normalized_skill")
-        # Remove duplicates per user
-        .dropDuplicates(["user_id", "normalized_skill"])
-        # Add metadata
-        .withColumn("confidence", F.lit(0.8))
-        .withColumn("processed_at", F.current_timestamp())
-    )
-    
-    skill_count = skills_df.count()
-    
-    if skill_count > 0:
-        # Show extracted skills
-        print(f"\n✅ Found {skill_count} unique skills")
-        display(skills_df.groupBy("user_id").agg(
-            F.count("normalized_skill").alias("skill_count"),
-            F.collect_list("normalized_skill").alias("skills")
-        ))
-        
-        # Save to silver skills table (merge to avoid duplicates)
-        skills_df.write.format("delta").mode("append").saveAsTable("career_copilot_dev.main.silver_resume_skills")
-        
-        print(f"\n✅ Saved {skill_count} skills to silver table")
-    else:
-        print("⚠️ No skills found matching the regex pattern")
+    print(f"Running helper pipeline on {success_count} record(s)")
 
-print("\n🎯 Silver skill extraction complete!")
+    cleaned_df = clean_resume_text(success_df, text_col="raw_text")
+    section_df = extract_sections(cleaned_df, text_col="clean_text")
+    redacted_df = redact_pii(cleaned_df, text_col="clean_text")
+    quality_df = build_quality_metrics(cleaned_df)
+    good_df, quarantine_df = split_quarantine(quality_df)
+
+    skills_df = extract_skills(good_df, text_col="clean_text")
+    evidence_df = build_skill_evidence(good_df, skills_df, text_col="clean_text")
+    exp_features_df = extract_experience_features(good_df, text_col="clean_text")
+
+    # Minimal entity table from skill outputs (v1)
+    entities_df = (
+        skills_df
+        .select("file_id", "user_id", F.lit("skill").alias("entity_type"), F.col("normalized_skill").alias("entity_value"), "confidence", "processed_at")
+    )
+
+    # Write Silver outputs
+    (
+        cleaned_df
+        .select("file_id", "user_id", "clean_text", "token_count", "text_quality_flag", F.current_timestamp().alias("cleaned_at"))
+        .write.format("delta").mode("append").saveAsTable(SILVER_RESUME_TEXT_CLEAN)
+    )
+
+    (
+        section_df
+        .select(
+            "file_id", "user_id", "has_skills_section", "has_experience_section",
+            "has_projects_section", "has_education_section", F.current_timestamp().alias("processed_at")
+        )
+        .write.format("delta").mode("append").saveAsTable(SILVER_RESUME_SECTIONS)
+    )
+
+    entities_df.write.format("delta").mode("append").saveAsTable(SILVER_RESUME_ENTITIES)
+    skills_df.write.format("delta").mode("append").saveAsTable(SILVER_RESUME_SKILLS)
+    evidence_df.write.format("delta").mode("append").saveAsTable(SILVER_SKILL_EVIDENCE)
+    exp_features_df.write.format("delta").mode("append").saveAsTable(SILVER_EXPERIENCE_FEATURES)
+
+    (
+        quality_df
+        .select("file_id", "user_id", "is_empty_text", "is_too_short", "quality_score", F.current_timestamp().alias("quality_checked_at"))
+        .write.format("delta").mode("append").saveAsTable(SILVER_RESUME_QUALITY)
+    )
+
+    (
+        redacted_df
+        .select("file_id", "user_id", "redacted_text", "has_email", "has_phone", "has_url", F.current_timestamp().alias("redacted_at"))
+        .write.format("delta").mode("append").saveAsTable(SILVER_PII_REDACTED_TEXT)
+    )
+
+    if quarantine_df.count() > 0:
+        (
+            quarantine_df
+            .select("file_id", "user_id", "quarantine_reason", "quality_score", F.current_timestamp().alias("quarantined_at"))
+            .write.format("delta").mode("append").saveAsTable(SILVER_QUARANTINE)
+        )
+
+    print("Silver helper pipeline completed")
+    print(f"Valid skill records: {skills_df.count()}")
+    print(f"Quarantined records: {quarantine_df.count()}")

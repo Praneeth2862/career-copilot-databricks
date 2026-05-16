@@ -3,8 +3,14 @@
 
 from pyspark.sql import functions as F
 
+CATALOG = "career_copilot_dev"
+SCHEMA = "main"
+SILVER_RESUME_SKILLS = f"{CATALOG}.{SCHEMA}.silver_resume_skills"
+GOLD_USER_SKILL_PROFILE = f"{CATALOG}.{SCHEMA}.gold_user_skill_profile"
+GOLD_FIT_FEATURES = f"{CATALOG}.{SCHEMA}.gold_fit_features"
+
 user_skills = (
-    spark.table("silver.resume_skills")
+    spark.table(SILVER_RESUME_SKILLS)
     .groupBy("user_id")
     .agg(F.collect_set("normalized_skill").alias("skills"))
 )
@@ -23,7 +29,7 @@ profile = (
     .write
     .format("delta")
     .mode("overwrite")
-    .saveAsTable("gold.user_skill_profile")
+    .saveAsTable(GOLD_USER_SKILL_PROFILE)
 )
 
 # Placeholder deterministic score for SQL-serving integration
@@ -40,8 +46,7 @@ fit = (
     .write
     .format("delta")
     .mode("overwrite")
-    .saveAsTable("gold.fit_features")
+    .saveAsTable(GOLD_FIT_FEATURES)
 )
 
 print("Gold features refreshed")
-
